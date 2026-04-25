@@ -1,0 +1,19 @@
+
+services:
+  comp640-db:
+    image: comp640-db
+    container_name: comp640-db
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: password
+      POSTGRES_DB: comp640DB
+    volumes:
+      - "comp640-db-data:/var/lib/postgresql/comp640-db-data"
+
+volumes:
+  comp640-db-data:
