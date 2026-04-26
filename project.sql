@@ -1,3 +1,4 @@
+-- For PostgreSQL 18+; uses gen_random_uuid() from pgcrypto for UUID generation.
 CREATE TABLE clinic_location (
     location_id     UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
     name            VARCHAR(120) NOT NULL,
@@ -76,7 +77,7 @@ CREATE TABLE service (
     service_id      UUID           PRIMARY KEY DEFAULT gen_random_uuid(),
     name            VARCHAR(120)   NOT NULL,
     description     TEXT,
-    service_type    VARCHAR(60)    NOT NULL,  -- 'consultation', 'blood test', 'imaging', 'procedure', etc.
+    service_type    VARCHAR(60)    NOT NULL,  -- e.g.   'consultation', 'blood test', 'imaging', 'procedure', etc.
     duration_mins   SMALLINT       NOT NULL DEFAULT 30,
     base_price      NUMERIC(10,2)  NOT NULL DEFAULT 0.00,
     cpt_code        VARCHAR(10),
@@ -112,7 +113,7 @@ CREATE TABLE appointment_service (
     appointment_id          UUID           NOT NULL REFERENCES appointment(appointment_id) ON DELETE CASCADE,
     service_id              UUID           NOT NULL REFERENCES service(service_id) ON DELETE RESTRICT,
     quantity                SMALLINT       NOT NULL DEFAULT 1,
-    unit_price              NUMERIC(10,2)  NOT NULL,  -- snapshot of price at time of service
+    unit_price              NUMERIC(10,2)  NOT NULL,
     notes                   TEXT,
     created_at              TIMESTAMPTZ    NOT NULL DEFAULT NOW(),
     UNIQUE (appointment_id, service_id)
@@ -267,44 +268,16 @@ ORDER BY a.scheduled_at;
 
 -- ============================================================
 -- Clinic Schema — Business Rules Change Script
--- Target:  PostgreSQL 13+
+-- Target:  PostgreSQL 18+
 -- Rules:
---   BR-1  Telehealth appointments must not assign a room
---   BR-2  Invoice total = SUM(services) - discount + tax
---   BR-3  Payment cannot exceed remaining invoice balance
--- ============================================================
--- Safe to run on a database created from clinic_schema.sql.
--- All changes are additive (no destructive DDL).
--- Each rule is wrapped in its own transaction so a failure in
--- one block does not roll back the others.
+--   BizRule-1  Telehealth appointments must not assign a room
+--   BizRule-2  Invoice total = SUM(services) - discount + tax
+--   BizRule-3  Payment cannot exceed remaining invoice balance
 -- ============================================================
 
-
 -- ============================================================
--- BR-1  TELEHEALTH APPOINTMENTS MUST NOT ASSIGN A ROOM
+-- BizRule-1  TELEHEALTH APPOINTMENTS MUST NOT ASSIGN A ROOM
 -- ============================================================
--- The original schema already has a CHECK constraint on the
--- appointment table, but it only fires on INSERT/UPDATE of the
--- appointment row itself.  Two gaps remain:
---
---   Gap A: A user could UPDATE appointment_type from 'in_person'
---          to 'telehealth' while leaving room_id set, and vice
---          versa — the existing CHECK catches this correctly,
---          but only if both columns are in the same UPDATE.
---          A SET appointment_type = 'telehealth' alone, without
---          also clearing room_id, would slip past because
---          PostgreSQL re-evaluates the CHECK with the *new* row,
---          which contains the old room_id.  The CHECK should
---          already catch this — confirm it is named so we can
---          reference it clearly.
---
---   Gap B: A user could UPDATE appointment_type alone via an ORM
---          that sends only the changed column.  We add a trigger
---          that auto-clears room_id whenever type flips to
---          'telehealth', providing a safe automatic correction
---          rather than a hard error (which would break patching
---          workflows).
---
 -- The existing constraint name is chk_room_telehealth.  We drop
 -- and re-add it with a cleaner name and tighter wording so the
 -- error message is human-readable in logs.
@@ -319,7 +292,6 @@ ALTER TABLE appointment
     ADD CONSTRAINT chk_telehealth_no_room CHECK (
         NOT (appointment_type = 'telehealth' AND room_id IS NOT NULL)
     );
-
 COMMENT ON CONSTRAINT chk_telehealth_no_room ON appointment IS 'BizRule-1: Telehealth appointments must not assign a room.';
 
 -- 1b. Trigger function: when appointment_type is set to 'telehealth', automatically null out room_id so callers that patch only the type column are handled gracefully.
@@ -328,9 +300,7 @@ RETURNS TRIGGER
 LANGUAGE plpgsql AS $$
 BEGIN
     IF NEW.appointment_type = 'telehealth' AND NEW.room_id IS NOT NULL THEN
-        -- Auto-correct rather than error: clear the room assignment.
-        -- The caller's intent (switch to telehealth) is unambiguous;
-        -- the room reference is the stale data.
+        -- For room_id to NULL when appointment_type is set to telehealth.  If the room_id was already NULL, we leave it as is (idempotent).
         NEW.room_id := NULL;
         NEW.telehealth_url := COALESCE(NEW.telehealth_url, OLD.telehealth_url);
     END IF;
@@ -351,14 +321,13 @@ CREATE TRIGGER trg_clear_room_for_telehealth
     ON appointment
     FOR EACH ROW
     EXECUTE FUNCTION trg_fn_clear_room_for_telehealth();
-
 COMMENT ON FUNCTION trg_fn_clear_room_for_telehealth() IS 'BizRule-1: Telehealth appointments must not assign a room.';
 
 COMMIT;
 
 
 -- ============================================================
--- BR-2  INVOICE TOTAL = SUM(services) - DISCOUNT + TAX
+-- BizRule-2  INVOICE TOTAL = SUM(services) - DISCOUNT + TAX
 -- ============================================================
 -- Strategy: keep the existing denormalised columns (subtotal,
 -- discount, tax, total_amount) for fast reads and reporting,
@@ -388,7 +357,7 @@ COMMIT;
 
 BEGIN;
 
--- 2a. Prevent negative totals.
+-- hedge against negative values
 ALTER TABLE invoice
     DROP CONSTRAINT IF EXISTS chk_invoice_total_non_negative;
 
@@ -427,7 +396,6 @@ DECLARE
     v_discount       NUMERIC(10,2);
     v_tax            NUMERIC(10,2);
 BEGIN
-    -- Lock the invoice row for the duration of this calculation.
     SELECT appointment_id, discount, tax
       INTO v_appointment_id, v_discount, v_tax
       FROM invoice
@@ -438,7 +406,6 @@ BEGIN
         RAISE EXCEPTION 'fn_recompute_invoice_total: invoice % does not exist', p_invoice_id;
     END IF;
 
-    -- Sum all service lines for this appointment.
     SELECT COALESCE(SUM(quantity * unit_price), 0.00)
       INTO v_subtotal
       FROM appointment_service
@@ -466,14 +433,13 @@ DECLARE
     v_appt_id   UUID;
     v_inv_id    UUID;
 BEGIN
-    -- Resolve the appointment from the affected row.
     v_appt_id := COALESCE(NEW.appointment_id, OLD.appointment_id);
 
     SELECT invoice_id
       INTO v_inv_id
       FROM invoice
      WHERE appointment_id = v_appt_id
-     LIMIT 1;   -- policy: one active invoice per appointment
+     LIMIT 1;
 
     IF v_inv_id IS NOT NULL THEN
         PERFORM fn_recompute_invoice_total(v_inv_id);
@@ -491,21 +457,18 @@ CREATE TRIGGER trg_sync_invoice_on_service_change
     ON appointment_service
     FOR EACH ROW
     EXECUTE FUNCTION trg_fn_sync_invoice_on_service_change();
-
 COMMENT ON FUNCTION trg_fn_sync_invoice_on_service_change() IS
     'BizRule-2: Fires on appointment_service changes; delegates to fn_recompute_invoice_total to keep invoice totals consistent.';
 
 -- 2d. Trigger on invoice:
 --     When discount or tax is edited directly, recompute total_amount.
---     Also block direct writes to subtotal and total_amount from
---     application code (they are always derived).
+--     Also block direct writes to subtotal and total_amount from application code (they are always derived).
 CREATE OR REPLACE FUNCTION trg_fn_invoice_totals_guard()
 RETURNS TRIGGER
 LANGUAGE plpgsql AS $$
 BEGIN
     -- Prevent manual overrides of derived columns.
-    -- Allow the recompute function itself to write them by checking
-    -- whether the change came from that function via a session variable.
+    -- Allow the recompute function itself to write them by checking whether the change came from that function via a session variable.
     IF current_setting('clinic.recomputing_invoice', TRUE) IS DISTINCT FROM 'true' THEN
         IF NEW.subtotal IS DISTINCT FROM OLD.subtotal THEN
             RAISE EXCEPTION
@@ -520,7 +483,6 @@ BEGIN
     IF NEW.discount IS DISTINCT FROM OLD.discount
     OR NEW.tax      IS DISTINCT FROM OLD.tax
     THEN
-        -- Signal to the recompute function that it may write derived cols.
         PERFORM set_config('clinic.recomputing_invoice', 'true', TRUE);
         PERFORM fn_recompute_invoice_total(NEW.invoice_id);
         PERFORM set_config('clinic.recomputing_invoice', 'false', TRUE);
@@ -542,7 +504,6 @@ CREATE TRIGGER trg_invoice_totals_guard
     ON invoice
     FOR EACH ROW
     EXECUTE FUNCTION trg_fn_invoice_totals_guard();
-
 COMMENT ON FUNCTION trg_fn_invoice_totals_guard() IS
     'BizRule-2: Blocks direct writes to derived invoice columns (subtotal, total_amount) and re-derives total_amount when discount or tax changes.';
 
@@ -550,7 +511,7 @@ COMMIT;
 
 
 -- ============================================================
--- BR-3  PAYMENT CANNOT EXCEED REMAINING BALANCE
+-- BizRule-3  PAYMENT CANNOT EXCEED REMAINING BALANCE
 -- ============================================================
 -- "Remaining balance" = invoice.total_amount - invoice.amount_paid
 -- (where amount_paid is the running sum of all posted payments).
@@ -592,9 +553,7 @@ ALTER TABLE payment
 
 ALTER TABLE payment
     ADD CONSTRAINT payment_payment_method_check
-    CHECK (payment_method IN (
-        'cash', 'credit_card', 'debit_card', 'check', 'insurance', 'ach', 'other', 'refund'
-    ));
+    CHECK (payment_method IN ('cash', 'credit_card', 'debit_card', 'check', 'insurance', 'ach', 'other', 'refund'));
 
 -- 3b. BEFORE INSERT guard: prevent overpayment.
 CREATE OR REPLACE FUNCTION trg_fn_prevent_overpayment()
@@ -622,14 +581,12 @@ BEGIN
         RAISE EXCEPTION 'BizRule-3: Invoice % not found.', NEW.invoice_id;
     END IF;
 
-    -- Block payments against voided invoices.
     IF v_inv_status = 'voided' THEN
         RAISE EXCEPTION
             'BizRule-3: Cannot post a payment against a voided invoice (%).',
             NEW.invoice_id;
     END IF;
 
-    -- Block payments against already-paid invoices.
     IF v_inv_status = 'paid' THEN
         RAISE EXCEPTION
             'BizRule-3: Invoice % is already fully paid. Use payment_method = ''refund'' to issue a credit.',
@@ -657,7 +614,6 @@ CREATE TRIGGER trg_prevent_overpayment
     ON payment
     FOR EACH ROW
     EXECUTE FUNCTION trg_fn_prevent_overpayment();
-
 COMMENT ON FUNCTION trg_fn_prevent_overpayment() IS
     'BizRule-3: Blocks payment inserts that would exceed the invoice remaining balance. Skips the check for refund payments. Uses SELECT FOR UPDATE to prevent races.';
 
@@ -679,12 +635,7 @@ BEGIN
 
     -- Recompute the authoritative paid total from all payment rows.
     -- Normal payments add to paid; refund rows subtract.
-    SELECT
-        COALESCE(SUM(
-            CASE WHEN payment_method = 'refund' THEN -amount
-                 ELSE amount
-            END
-        ), 0.00)
+    SELECT COALESCE(SUM(CASE WHEN payment_method = 'refund' THEN -amount ELSE amount END), 0.00)
       INTO v_amount_paid
       FROM payment
      WHERE invoice_id = v_inv_id;
@@ -709,10 +660,8 @@ BEGIN
            status      = v_new_status
      WHERE invoice_id  = v_inv_id
        AND status NOT IN ('voided', 'collections');
-       -- Voided and collections statuses are managed explicitly;
-       -- payment activity should not override them.
 
-    RETURN NULL;  -- AFTER trigger
+    RETURN NULL;
 END;
 $$;
 
@@ -723,33 +672,7 @@ CREATE TRIGGER trg_sync_invoice_amount_paid
     ON payment
     FOR EACH ROW
     EXECUTE FUNCTION trg_fn_sync_invoice_amount_paid();
-
 COMMENT ON FUNCTION trg_fn_sync_invoice_amount_paid() IS
     'BizRule-3: Keeps invoice.amount_paid and invoice.status in sync after any payment INSERT, UPDATE, or DELETE. Refund rows reduce amount_paid.';
 
 COMMIT;
-
-
--- ============================================================
--- SMOKE-TEST QUERIES  (run manually to verify; do not execute
--- as part of a migration — they require sample data)
--- ============================================================
-/*
-
--- BR-1: Should raise "cannot assign a room to a telehealth appointment"
--- (trigger will null out room_id automatically on UPDATE)
--- UPDATE appointment
---    SET appointment_type = 'telehealth'
---  WHERE appointment_id = '<some_in_person_id>';
--- Then verify: SELECT room_id FROM appointment WHERE appointment_id = '<id>';
--- Expected: room_id IS NULL
-
--- BR-2: After inserting appointment_service rows, invoice totals auto-update.
--- SELECT subtotal, discount, tax, total_amount FROM invoice WHERE invoice_id = '<id>';
--- Manually SET subtotal = 99 should raise BR-2 exception.
-
--- BR-3: After posting payments summing to total_amount, one more payment should raise:
--- "BR-3: Payment amount (...) exceeds the remaining balance (...)"
--- A refund payment should succeed regardless of balance.
-
-*/
