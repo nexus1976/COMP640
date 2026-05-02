@@ -275,7 +275,7 @@ VALUES
 -- Statuses cover the full lifecycle: completed, confirmed, cancelled.
 INSERT INTO appointment
     (appointment_id, patient_id, doctor_id, location_id, room_id,
-     scheduled_at, duration_mins, appointment_type, status,
+     scheduled_at, duration_mins, mode, status,
      telehealth_url, chief_complaint, notes)
 VALUES
 
@@ -880,12 +880,12 @@ DECLARE
     v_room_before UUID;
     v_room_after  UUID;
 BEGIN
-    -- Temporarily assign a room to a telehealth appointment (bypasses the trigger intentionally via direct update to appointment_type first, leaving room set to test).
+    -- Temporarily assign a room to a telehealth appointment (bypasses the trigger intentionally via direct update to mode first, leaving room set to test).
     -- We force a room_id onto the confirmed telehealth appointment (appt 7 — Devon Marsh) and then switch type back to telehealth to show the trigger clears it.
 
     -- Step 1: Switch appt 7 to in_person and assign a room.
     UPDATE appointment
-       SET appointment_type = 'in_person',
+       SET mode = 'in_person',
            room_id          = 'b0000001-0000-0000-0000-000000000006',
            telehealth_url   = NULL
      WHERE appointment_id   = 'aa000001-0000-0000-0000-000000000007';
@@ -898,7 +898,7 @@ BEGIN
 
     -- Step 2: Switch back to telehealth — trigger should null out room_id.
     UPDATE appointment
-       SET appointment_type = 'telehealth',
+       SET mode = 'telehealth',
            telehealth_url   = 'https://meet.meridian.example/rm/DM3QW6'
      WHERE appointment_id   = 'aa000001-0000-0000-0000-000000000007';
 

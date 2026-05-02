@@ -93,7 +93,7 @@ CREATE TABLE appointment (
     room_id             UUID         REFERENCES room(room_id) ON DELETE SET NULL, -- NULL for telehealth
     scheduled_at        TIMESTAMPTZ  NOT NULL,
     duration_mins       SMALLINT     NOT NULL DEFAULT 30,
-    appointment_type    VARCHAR(20)  NOT NULL DEFAULT 'in_person' CHECK (appointment_type IN ('in_person', 'telehealth')),
+    mode    VARCHAR(20)  NOT NULL DEFAULT 'in_person' CHECK (mode IN ('in_person', 'telehealth')),
     status              VARCHAR(30)  NOT NULL DEFAULT 'scheduled' CHECK (status IN ('scheduled','confirmed','in_progress','completed','cancelled','no_show')),
     telehealth_url      TEXT,
     chief_complaint     TEXT,
@@ -101,7 +101,7 @@ CREATE TABLE appointment (
     created_at          TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
     -- Telehealth appointments must not have a room; in-person appointments should have one.
     CONSTRAINT chk_room_telehealth CHECK (
-        (appointment_type = 'telehealth' AND room_id IS NULL) OR (appointment_type = 'in_person')
+        (mode = 'telehealth' AND room_id IS NULL) OR (mode = 'in_person')
     )
 );
 CREATE INDEX idx_appointment_patient   ON appointment(patient_id);
@@ -250,7 +250,7 @@ CREATE VIEW v_upcoming_appointments AS
 SELECT
     a.appointment_id,
     a.scheduled_at,
-    a.appointment_type,
+    a.mode,
     a.status,
     p.first_name || ' ' || p.last_name   AS patient_name,
     d.first_name || ' ' || d.last_name   AS doctor_name,
@@ -290,23 +290,23 @@ ALTER TABLE appointment DROP CONSTRAINT IF EXISTS chk_room_telehealth;
 
 ALTER TABLE appointment
     ADD CONSTRAINT chk_telehealth_no_room CHECK (
-        NOT (appointment_type = 'telehealth' AND room_id IS NOT NULL)
+        NOT (mode = 'telehealth' AND room_id IS NOT NULL)
     );
 COMMENT ON CONSTRAINT chk_telehealth_no_room ON appointment IS 'BizRule-1: Telehealth appointments must not assign a room.';
 
--- 1b. Trigger function: when appointment_type is set to 'telehealth', automatically null out room_id so callers that patch only the type column are handled gracefully.
+-- 1b. Trigger function: when mode is set to 'telehealth', automatically null out room_id so callers that patch only the type column are handled gracefully.
 CREATE OR REPLACE FUNCTION trg_fn_clear_room_for_telehealth()
 RETURNS TRIGGER
 LANGUAGE plpgsql AS $$
 BEGIN
-    IF NEW.appointment_type = 'telehealth' AND NEW.room_id IS NOT NULL THEN
-        -- For room_id to NULL when appointment_type is set to telehealth.  If the room_id was already NULL, we leave it as is (idempotent).
+    IF NEW.mode = 'telehealth' AND NEW.room_id IS NOT NULL THEN
+        -- For room_id to NULL when mode is set to telehealth.  If the room_id was already NULL, we leave it as is (idempotent).
         NEW.room_id := NULL;
         NEW.telehealth_url := COALESCE(NEW.telehealth_url, OLD.telehealth_url);
     END IF;
 
     -- Conversely, if switching FROM telehealth to in_person, clear the telehealth URL so stale video links are not left behind.
-    IF NEW.appointment_type = 'in_person' AND OLD.appointment_type = 'telehealth' THEN
+    IF NEW.mode = 'in_person' AND OLD.mode = 'telehealth' THEN
         NEW.telehealth_url := NULL;
     END IF;
 
@@ -317,7 +317,7 @@ $$;
 DROP TRIGGER IF EXISTS trg_clear_room_for_telehealth ON appointment;
 
 CREATE TRIGGER trg_clear_room_for_telehealth
-    BEFORE INSERT OR UPDATE OF appointment_type, room_id
+    BEFORE INSERT OR UPDATE OF mode, room_id
     ON appointment
     FOR EACH ROW
     EXECUTE FUNCTION trg_fn_clear_room_for_telehealth();
