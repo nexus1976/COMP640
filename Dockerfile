@@ -1,2 +1,3 @@
 FROM postgres:18
+COPY init.sql /docker-entrypoint-initdb.d/
 RUN apt update
