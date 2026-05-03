@@ -21,9 +21,13 @@ User = postgres
 Password = password
 ```
 
-You will also need a working Python 3.13+ environment with SQLAlchemy pip installed in order to run the executable Python script `main.py` which demonstrates the queries.
+You will also need a working Python 3.13+ environment with the following pip packages installed in order to run the executable Python script `main.py` which demonstrates the queries.
+#### pip packages
+- `sqlalchemy`
+- `psycopg2-binary`
+- `pandas`
 
 ## Deliverables
 1. The ER diagram (with keys, constraints, and cardinalities) is located at the root of this project in the file `ER-Diagram.pdf`.
-2. You can look at the file `init.sql` to see the database structure implementation, the 3 business rules enforcement, and how we seeded the database with data. There are liberal comments in here documenting the business rules as well as commented out SQL tests to demonstrated said rules.
-3. We developed the Python queries leveraging a Jupyter notebook (this is the file `canonicalqueries.ipynb`). If you want to see this notebook, it is suggested to have a working local installation of Anaconda along with Visual Studio Code with all of the Python and Jupyter extenstions by Microsoft installed. However, if you simply want to demonstrate the queries via their parameterized execution, simply run the Python script `main.py`.
+2. You can look at the file `init.sql` to see the database structure implementation, the 3 business rules enforcement, and how we seeded the database with data. There are liberal comments in here documenting the business rules as well as commented out SQL tests to demonstrate said rules.
+3. We developed the Python queries leveraging a Jupyter notebook (this is the file `canonicalqueries.ipynb`). If you want to utilize this notebook, it is suggested to have a working local installation of Anaconda along with Visual Studio Code with all of the Python and Jupyter extenstions by Microsoft installed. However, if you simply want to demonstrate the queries via their parameterized execution, simply run the Python script `main.py` in a terminal by issuing the command `python main.py` and follow the prompts.
