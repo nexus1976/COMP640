@@ -5,7 +5,7 @@
 - Tim Walewangko - ER Diagram
 - Daniel Graham - Database implementation
 
-All 3 of us equally participated in the overall design and colescing of Python queries into an executable format.
+All 3 of us equally participated in the overall design and coalescing of Python queries into an executable format.
 
 ## Running
 To run this project, you must have Docker and Docker Compose installed and available (most easily via installing Docker Desktop).
